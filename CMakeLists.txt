@@ -514,6 +514,8 @@ add_library(
   src/terminal/TerminalClient.cpp
   src/terminal/TitleParser.hpp
   src/terminal/TitleParser.cpp
+  src/terminal/SessionScrollback.hpp
+  src/terminal/SessionTranscript.hpp
   src/terminal/ServerFifoPath.hpp
   src/terminal/SshSetupHandler.hpp
   src/terminal/SshSetupHandler.cpp
