@@ -1,12 +1,17 @@
-// End-to-end OSC-133 test: drive the real etctl binary against a real bash
-// running interactively behind a pty, with a minimal but faithful FinalTerm/
-// iTerm2 shell integration (DEBUG trap emits C on the first command of a
-// prompt, PROMPT_COMMAND emits D;$? at the next prompt). Unlike EtctlRunTest --
-// which wires bash through plain pipes and therefore exercises the echo-marker
-// fallback -- a pty lets bash's prompt hooks fire, so this verifies the OSC-133
-// framing path against a genuine integration: clean output, correct exit codes,
-// and no injected marker leakage. Skipped if etctl or bash is unavailable.
+// End-to-end OSC-133 tests: drive the real etctl binary against a real shell
+// running interactively behind a pty, with a minimal FinalTerm/iTerm2-style
+// integration. Unlike EtctlRunTest (which wires a shell through plain pipes and
+// therefore only exercises the echo-marker fallback), a pty lets the prompt
+// hooks fire, so these verify the OSC-133 framings against a genuine
+// integration:
+//   - a zsh session (bracketed paste on by default, preexec/precmd emit C/D)
+//     exercises kBracketOsc133 -- the bare command is pasted, so the real
+//     command is what runs, with no eval-wrapper and no injected markers;
+//   - a bash session with OSC-133 but no bracketed paste exercises kEvalOsc133
+//     (eval here-doc + OSC read) and, forced, the kMark echo-marker fallback.
+// Skipped when the shell or etctl is unavailable.
 #include <atomic>
+#include <functional>
 #include <thread>
 
 #if __APPLE__
@@ -35,14 +40,14 @@ string etctlBin() {
   return "./etctl";
 }
 
-string bashPath() {
-  if (::access("/bin/bash", X_OK) == 0) return "/bin/bash";
-  if (::access("/usr/bin/bash", X_OK) == 0) return "/usr/bin/bash";
-  if (::access("/opt/homebrew/bin/bash", X_OK) == 0)
-    return "/opt/homebrew/bin/bash";
+string firstExecutable(std::initializer_list<const char*> paths) {
+  for (const char* p : paths)
+    if (::access(p, X_OK) == 0) return string(p);
   return "";
 }
-
+string zshPath() {
+  return firstExecutable({"/bin/zsh", "/usr/bin/zsh", "/opt/homebrew/bin/zsh"});
+}
 struct RunResult {
   string out;
   int code;
@@ -62,50 +67,21 @@ RunResult runEtctl(const string& args) {
   return r;
 }
 
-// A minimal FinalTerm/iTerm2-style bash integration: C once per command, then
-// D;<exit> at the following prompt. Written to a temp rcfile bash reads under
-// -i.
-const char* kBashOsc133Rc =
-    "PS1='$ '\n"
-    "set +m\n"
-    "__et_pre=\n"
-    "__et_pc() { local e=$?; printf '\\033]133;D;%s\\007' \"$e\"; __et_pre=; "
-    "}\n"
-    "__et_dbg() {\n"
-    "  [ -n \"$__et_pre\" ] && return 0\n"
-    "  [ \"$BASH_COMMAND\" = \"__et_pc\" ] && return 0\n"
-    "  __et_pre=1\n"
-    "  printf '\\033]133;C\\007'\n"
-    "}\n"
-    "PROMPT_COMMAND=__et_pc\n"
-    "trap '__et_dbg' DEBUG\n";
-
-}  // namespace
-
-TEST_CASE("EtctlRunOsc133AgainstRealShell", "[EtctlOsc133]") {
-  if (::access(etctlBin().c_str(), X_OK) != 0 || bashPath().empty()) {
-    WARN("etctl or bash unavailable; skipping OSC-133 pty test");
-    SUCCEED();
-    return;
-  }
-
-  char rcPath[] = "/tmp/etctl_osc133_rc_XXXXXX";
-  int rcFd = ::mkstemp(rcPath);
-  REQUIRE(rcFd >= 0);
-  RawSocketUtils::writeAll(rcFd, kBashOsc133Rc, strlen(kBashOsc133Rc));
-  ::close(rcFd);
-
-  int masterFd = -1;
-  pid_t pid = forkpty(&masterFd, nullptr, nullptr, nullptr);
+// Fork `childExec` behind a pty, wire the pty to a ControlConsole +
+// ControlListener (so the real etctl binary can drive it by name over the
+// control socket), let the shell reach its first prompt, then run `body` with
+// the session name and tear everything down.
+void drivePty(const std::function<void()>& childExec,
+              const std::function<void(const string& name)>& body) {
+  int master = -1;
+  pid_t pid = forkpty(&master, nullptr, nullptr, nullptr);
   REQUIRE(pid >= 0);
   if (pid == 0) {
-    setenv("TERM", "xterm", 1);
-    execl(bashPath().c_str(), "bash", "--rcfile", rcPath, "--noprofile", "-i",
-          (char*)nullptr);
+    childExec();
     _exit(127);
   }
-  int flags = fcntl(masterFd, F_GETFL, 0);
-  fcntl(masterFd, F_SETFL, flags | O_NONBLOCK);
+  int flags = fcntl(master, F_GETFL, 0);
+  fcntl(master, F_SETFL, flags | O_NONBLOCK);
 
   const string name = "etctlosc_" + std::to_string(::getpid());
   control_paths::ensureControlDir();
@@ -116,79 +92,189 @@ TEST_CASE("EtctlRunOsc133AgainstRealShell", "[EtctlOsc133]") {
   ControlListener listener(console, socketPath, [&]() { done = true; });
   listener.start();
 
-  // Relay A: injected input (etctl write) -> pty master (bash stdin).
   std::thread inRelay([&]() {
     try {
       while (!done) {
         char buf[4096];
         ssize_t n = ::read(console->getFd(), buf, sizeof(buf));
-        if (n > 0) {
-          RawSocketUtils::writeAll(masterFd, buf, n);
-        } else {
+        if (n > 0)
+          RawSocketUtils::writeAll(master, buf, n);
+        else
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
       }
     } catch (const std::exception&) {
     }
   });
-  // Relay B: pty master (bash output) -> scrollback (what etctl read sees).
   std::thread outRelay([&]() {
     try {
       while (!done) {
         char buf[4096];
-        ssize_t n = ::read(masterFd, buf, sizeof(buf));
-        if (n > 0) {
+        ssize_t n = ::read(master, buf, sizeof(buf));
+        if (n > 0)
           console->write(string(buf, n));
-        } else {
+        else
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
       }
     } catch (const std::exception&) {
     }
   });
 
-  // Let bash finish sourcing the rcfile and print its first prompt.
-  std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-  {
-    // Auto-detect: no flag. The prompt speaks OSC 133, so run must frame via it
-    // -- clean output, no injected ETCTL_ markers in the scrollback.
-    RunResult r = runEtctl("run " + name + " 'echo hello_osc' --timeout 10");
-    INFO("auto -> code=" << r.code << " out=[" << r.out << "]");
-    CHECK(r.code == 0);
-    CHECK(r.out.find("hello_osc") != string::npos);
-    CHECK(r.out.find("ETCTL_") == string::npos);
-  }
-  {
-    // Forced OSC-133 framing, exit code straight from D.
-    RunResult r = runEtctl("run --osc133 " + name + " '(exit 7)' --timeout 10");
-    INFO("exit7 -> code=" << r.code << " out=[" << r.out << "]");
-    CHECK(r.code == 7);
-    CHECK(r.out.find("ETCTL_") == string::npos);
-  }
-  {
-    // No trailing newline: body is exactly the output, prompt-prep trimmed.
-    RunResult r =
-        runEtctl("run --osc133 " + name + " 'printf foo' --timeout 10");
-    INFO("printf -> code=" << r.code << " out=[" << r.out << "]");
-    CHECK(r.code == 0);
-    CHECK(r.out == "foo");
-  }
-  {
-    // Multi-digit exit code parsed whole from D.
-    RunResult r =
-        runEtctl("run --osc133 " + name + " '(exit 137)' --timeout 10");
-    INFO("exit137 -> code=" << r.code << " out=[" << r.out << "]");
-    CHECK(r.code == 137);
-  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(600));
+  body(name);
 
   done = true;
   inRelay.join();
   outRelay.join();
   listener.shutdown();
-  ::close(masterFd);
+  ::close(master);
   ::kill(pid, SIGTERM);
   int st;
   ::waitpid(pid, &st, 0);
-  ::unlink(rcPath);
+}
+
+// Minimal zsh OSC-133 integration: preexec emits C, precmd emits D;$?. zsh has
+// bracketed paste on by default, so etctl detects kBracketOsc133 and injects
+// the bare command.
+const char* kZshRc =
+    "PROMPT='$ '\n"
+    "preexec() { printf '\\033]133;C\\007' }\n"
+    "precmd() { printf '\\033]133;D;%s\\007' $? }\n";
+
+// Minimal zsh OSC-133 integration with bracketed paste turned OFF, so etctl
+// detects kEvalOsc133 (eval here-doc + OSC read) rather than kBracketOsc133.
+const char* kZshEvalRc =
+    "PROMPT='$ '\n"
+    "unset zle_bracketed_paste\n"
+    "preexec() { printf '\\033]133;C\\007' }\n"
+    "precmd() { printf '\\033]133;D;%s\\007' $? }\n";
+
+// A throwaway ZDOTDIR holding a .zshrc, so the real ~/.zshrc doesn't interfere.
+string makeZdot(const char* rc) {
+  char dirTmpl[] = "/tmp/etctl_zdot_XXXXXX";
+  const string dir = ::mkdtemp(dirTmpl);
+  const string zrc = dir + "/.zshrc";
+  int fd = ::open(zrc.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  REQUIRE(fd >= 0);
+  RawSocketUtils::writeAll(fd, rc, strlen(rc));
+  ::close(fd);
+  return dir;
+}
+
+// Drive `body` against a zsh session whose ZDOTDIR/.zshrc is `rc`, behind a
+// pty.
+void driveZsh(const char* rc,
+              const std::function<void(const string& name)>& body) {
+  const string zdot = makeZdot(rc);
+  const string zsh = zshPath();
+  drivePty(
+      [&]() {
+        setenv("TERM", "xterm", 1);
+        setenv("HOME", zdot.c_str(), 1);
+        setenv("ZDOTDIR", zdot.c_str(), 1);
+        execl(zsh.c_str(), "zsh", "-i", (char*)nullptr);
+      },
+      body);
+}
+
+}  // namespace
+
+TEST_CASE("EtctlRunBracketedOsc133 (zsh)", "[EtctlOsc133]") {
+  if (::access(etctlBin().c_str(), X_OK) != 0 || zshPath().empty()) {
+    WARN("etctl or zsh unavailable; skipping bracketed OSC-133 pty test");
+    SUCCEED();
+    return;
+  }
+  driveZsh(kZshRc, [&](const string& name) {
+    {
+      // Auto-detect -> kBracketOsc133. The bare command runs, so the real
+      // command is in the scrollback (no eval-wrapper) with no markers.
+      RunResult r = runEtctl("run " + name + " 'echo hi_zsh' --timeout 10");
+      INFO("auto -> code=" << r.code << " out=[" << r.out << "]");
+      CHECK(r.code == 0);
+      CHECK(r.out.find("hi_zsh") != string::npos);
+      CHECK(r.out.find("ETCTL_") == string::npos);
+    }
+    {
+      // Multi-line body runs as one command via the paste.
+      RunResult r = runEtctl("run " + name +
+                             " 'X=42\nprintf \"v=[%s]\" \"$X\"' --timeout 10");
+      INFO("multiline -> code=" << r.code << " out=[" << r.out << "]");
+      CHECK(r.code == 0);
+      CHECK(r.out == "v=[42]");
+    }
+    {
+      RunResult r = runEtctl("run " + name + " '(exit 7)' --timeout 10");
+      CHECK(r.code == 7);
+      CHECK(r.out.find("ETCTL_") == string::npos);
+    }
+    {
+      // No trailing newline: body is exactly the output.
+      RunResult r = runEtctl("run " + name + " 'printf foo' --timeout 10");
+      CHECK(r.code == 0);
+      CHECK(r.out == "foo");
+    }
+    {
+      // History expansion is disabled on detect, so a bare `!` is literal.
+      RunResult r = runEtctl("run " + name + " 'echo a!b' --timeout 10");
+      CHECK(r.code == 0);
+      CHECK(r.out.find("a!b") != string::npos);
+    }
+    {
+      // Malformed body parks on a continuation prompt; run must abort (not
+      // hang) and recover the session.
+      RunResult r = runEtctl("run " + name + " 'echo \"oops' --timeout 30");
+      INFO("malformed -> code=" << r.code << " out=[" << r.out << "]");
+      CHECK(r.code == 125);
+    }
+    {
+      // Session still healthy after the abort.
+      RunResult r = runEtctl("run " + name + " 'echo alive' --timeout 10");
+      CHECK(r.code == 0);
+      CHECK(r.out.find("alive") != string::npos);
+    }
+  });
+}
+
+TEST_CASE("EtctlRunEvalOsc133AndMarkers (zsh, no bracketed paste)",
+          "[EtctlOsc133]") {
+  if (::access(etctlBin().c_str(), X_OK) != 0 || zshPath().empty()) {
+    WARN("etctl or zsh unavailable; skipping eval/marker OSC-133 pty test");
+    SUCCEED();
+    return;
+  }
+  driveZsh(kZshEvalRc, [&](const string& name) {
+    {
+      // Auto-detect -> kEvalOsc133 (OSC 133 but no bracketed paste): eval
+      // here-doc injection, boundaries/exit from OSC 133, no echo markers.
+      RunResult r = runEtctl("run " + name + " 'echo hi_eval' --timeout 10");
+      INFO("eval-osc -> code=" << r.code << " out=[" << r.out << "]");
+      CHECK(r.code == 0);
+      CHECK(r.out.find("hi_eval") != string::npos);
+      CHECK(r.out.find("ETCTL_") == string::npos);
+    }
+    {
+      // Multi-line via the eval here-doc runs as one command.
+      RunResult r = runEtctl("run " + name +
+                             " 'Y=9\nprintf \"e=[%s]\" \"$Y\"' --timeout 10");
+      CHECK(r.code == 0);
+      CHECK(r.out == "e=[9]");
+    }
+    {
+      RunResult r = runEtctl("run " + name + " '(exit 137)' --timeout 10");
+      CHECK(r.code == 137);
+    }
+    {
+      RunResult r = runEtctl("run " + name + " 'printf tight' --timeout 10");
+      CHECK(r.code == 0);
+      CHECK(r.out == "tight");
+    }
+    {
+      // Forced echo-marker fallback: still correct, works on any shell.
+      RunResult r =
+          runEtctl("run --no-osc133 " + name + " 'echo hi_mark' --timeout 10");
+      INFO("mark -> code=" << r.code << " out=[" << r.out << "]");
+      CHECK(r.code == 0);
+      CHECK(r.out.find("hi_mark") != string::npos);
+    }
+  });
 }

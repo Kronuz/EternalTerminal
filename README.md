@@ -255,16 +255,30 @@ set `$ETCTL_HOME` to relocate it.
 ### How `run` frames a command
 
 `run` has to know where a command's output starts and ends and what it exited
-with. By default it brackets the command with lightweight echo markers. When the
-remote shell has FinalTerm/iTerm2 shell integration (the OSC 133 `C`/`D` command
-marks, as emitted by the official bash, zsh, fish, tcsh, and xonsh integrations,
-or any compatible prompt), `run` uses those marks instead: nothing is injected
-into the scrollback and the exit code is read straight from the `D` mark. It also
-trims the prompt-prep sequences a shell splices around the output (a zsh/fish
-end-of-line mark, iTerm2's `OSC 1337` context report, a title, bracketed-paste
-toggles) so the captured output is the command's alone. Detection is automatic
-and cached per session (`~/.et/ctl/<name>.osc133`); force it with `--osc133` or
-fall back to the echo markers with `--no-osc133`.
+with, and it has to inject the command safely (a multi-line body must run as one
+command, and quotes/braces/`!`/parse errors must not desync the frame or hang on
+a continuation prompt). It picks the cleanest of three framings for the far-side
+prompt, detected once per session and cached (`~/.et/ctl/<name>.osc133`):
+
+- **Bracketed paste + OSC 133** (the default when the prompt has FinalTerm/iTerm2
+  shell integration *and* a bracketed-paste-aware line editor -- the official
+  bash, zsh, fish, and xonsh integrations all qualify). The bare command is sent
+  inside bracketed paste, so the **real command shows in the scrollback** with no
+  wrapper and no injected markers, and the output boundaries + exit code come
+  straight from the prompt's own OSC 133 `C`/`D` marks.
+- **Eval here-doc + OSC 133** (a prompt with OSC 133 but no bracketed paste, e.g.
+  tcsh). The body is wrapped in `eval "$(cat <<'BODY' ... )"` -- so it is handed
+  to the shell as data, immune to its own syntax -- and boundaries come from OSC
+  133. No echo markers, but the wrapper is visible.
+- **Eval here-doc + echo markers** (the universal fallback for a shell with no
+  OSC 133, e.g. dash). The eval is bracketed by `echo <mark> ... <mark>:$?`.
+
+`run` also trims the prompt-prep sequences a shell splices around the output (a
+zsh/fish end-of-line mark, iTerm2's `OSC 1337` context report, a title,
+bracketed-paste toggles) so the captured output is the command's alone, and it
+disables history expansion on the control session (a script-driven session has no
+use for interactive `!`). Force bracketed paste with `--osc133`, or the echo
+markers with `--no-osc133`.
 
 Run `etctl` with no arguments for the full verb list, `etctl <verb> --help` for
 any verb's options, and `etctl --version` for the version. `--ctl` is not

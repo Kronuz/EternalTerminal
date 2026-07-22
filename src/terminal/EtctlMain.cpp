@@ -1,22 +1,21 @@
 /*
  * etctl: the client-side control CLI for backgrounded `et --ctl` sessions.
  *
- * It is a thin, stateless translator: each invocation resolves a session's local
- * control socket (~/.et/ctl/<name>.sock), sends one native control frame, and
- * prints the response.  The transport carries ET's own vocabulary (raw input
- * bytes, a TerminalInfo resize); the richer verbs here (writeln, key,
+ * It is a thin, stateless translator: each invocation resolves a session's
+ * local control socket (~/.et/ctl/<name>.sock), sends one native control frame,
+ * and prints the response.  The transport carries ET's own vocabulary (raw
+ * input bytes, a TerminalInfo resize); the richer verbs here (writeln, key,
  * interrupt, eof, expect, observe) are ergonomic sugar composed from it.
  */
+#include <sys/ioctl.h>
+
 #include <algorithm>
 #include <csignal>
+#include <cxxopts.hpp>
 #include <fstream>
 #include <map>
 #include <regex>
 #include <sstream>
-
-#include <sys/ioctl.h>
-
-#include <cxxopts.hpp>
 
 #include "ControlPaths.hpp"
 #include "ControlProtocol.hpp"
@@ -29,9 +28,10 @@ using namespace et;
 namespace {
 
 /*
- * Ctrl-C handling.  et-lib's easyloggingpp installs a crash handler that catches
- * SIGINT and aborts with a "CRASH HANDLED" backtrace; but here Ctrl-C is the
- * normal way to stop a blocking verb (run, expect, wait, read --follow, sniff
+ * Ctrl-C handling.  et-lib's easyloggingpp installs a crash handler that
+ * catches SIGINT and aborts with a "CRASH HANDLED" backtrace; but here Ctrl-C
+ * is the normal way to stop a blocking verb (run, expect, wait, read --follow,
+ * sniff
  * --follow).  main() runs after easyloggingpp's static init, so we replace its
  * handler with one that exits cleanly using the conventional code 130.  The
  * interactive attach/observe verbs put the terminal in raw mode (ISIG off), so
@@ -47,13 +47,13 @@ void installInterruptHandler() {
 }
 
 /*
- * Window-size tracking for attach/observe.  The session has its own logical size
- * (default 132x24); a viewer's terminal is usually a different width.  Because
- * attach/observe replay the raw byte stream (no virtual screen), cursor-addressed
- * output (a zsh prompt redraw, vim) is computed for the session's size and renders
- * wrong at a different width.  So we push the local size to the session on start
- * and on every SIGWINCH (unless --no-resize).  The handler only sets a flag; the
- * attach loop does the actual send.
+ * Window-size tracking for attach/observe.  The session has its own logical
+ * size (default 132x24); a viewer's terminal is usually a different width.
+ * Because attach/observe replay the raw byte stream (no virtual screen),
+ * cursor-addressed output (a zsh prompt redraw, vim) is computed for the
+ * session's size and renders wrong at a different width.  So we push the local
+ * size to the session on start and on every SIGWINCH (unless --no-resize).  The
+ * handler only sets a flag; the attach loop does the actual send.
  */
 volatile sig_atomic_t g_winchPending = 0;
 void onWinch(int) { g_winchPending = 1; }
@@ -65,20 +65,23 @@ string descFor(const string& cmd) {
   if (cmd == "sessions") return "List local control sessions.";
   if (cmd == "gc")
     return "Remove dead session sockets (and, with --idle, end idle sessions).";
-  if (cmd == "info") return "Show session status (liveness, link, size, cursor).";
+  if (cmd == "info")
+    return "Show session status (liveness, link, size, cursor).";
   if (cmd == "kill") return "Force-stop a session's local daemon.";
   if (cmd == "read") return "Read session output without consuming it.";
-  if (cmd == "sniff") return "Tap the byte exchange (sent input + received output).";
+  if (cmd == "sniff")
+    return "Tap the byte exchange (sent input + received output).";
   if (cmd == "wait") return "Wait until the session output goes quiet.";
   if (cmd == "write") return "Inject raw input bytes (a TEXT arg, or stdin).";
-  if (cmd == "writeln")
-    return "Inject a line of input (or a hidden password).";
+  if (cmd == "writeln") return "Inject a line of input (or a hidden password).";
   if (cmd == "key")
     return "Inject named keys (arrows, function keys, interrupt/eof, ...).";
-  if (cmd == "run") return "Run a command; print its output verbatim, exit with its code.";
+  if (cmd == "run")
+    return "Run a command; print its output verbatim, exit with its code.";
   if (cmd == "expect") return "Wait for a pattern to appear in the output.";
   if (cmd == "resize") return "Set the session's terminal size.";
-  if (cmd == "observe") return "Watch the live screen, read-only (Ctrl-C/Ctrl-] to detach).";
+  if (cmd == "observe")
+    return "Watch the live screen, read-only (Ctrl-C/Ctrl-] to detach).";
   if (cmd == "attach") return "Attach interactively (Ctrl-] to detach).";
   return "";
 }
@@ -100,13 +103,13 @@ cxxopts::Options buildOptions(const string& cmd) {
     o.parse_positional({"NAME"});
     synopsis = "NAME";
   } else if (cmd == "attach" || cmd == "observe") {
-    o.add_options()
-        ("cursor", "Start at byte offset N (default: oldest retained)",
-         cxxopts::value<long long>())
-        ("tail", "Start at the current head (only show new output)")
-        ("no-resize",
-         "Don't match the session's size to this terminal (by default attach "
-         "and observe resize the session on start and on every window change)");
+    o.add_options()("cursor",
+                    "Start at byte offset N (default: oldest retained)",
+                    cxxopts::value<long long>())(
+        "tail", "Start at the current head (only show new output)")(
+        "no-resize",
+        "Don't match the session's size to this terminal (by default attach "
+        "and observe resize the session on start and on every window change)");
     pos("NAME", "session name or socket path", cxxopts::value<string>());
     o.parse_positional({"NAME"});
     synopsis = "NAME [OPTION...]";
@@ -119,31 +122,29 @@ cxxopts::Options buildOptions(const string& cmd) {
     o.parse_positional({"NAME"});
     synopsis = "NAME [--wait[=S]]";
   } else if (cmd == "read") {
-    o.add_options()
-        ("cursor", "Start at byte offset N (default: oldest retained)",
-         cxxopts::value<long long>())
-        ("strip", "Remove ANSI escape sequences")
-        ("follow", "Tail new output until interrupted (Ctrl-C)")
-        ("timeout", "Wait up to S seconds for new output, then return",
-         cxxopts::value<double>());
+    o.add_options()(
+        "cursor", "Start at byte offset N (default: oldest retained)",
+        cxxopts::value<long long>())("strip", "Remove ANSI escape sequences")(
+        "follow", "Tail new output until interrupted (Ctrl-C)")(
+        "timeout", "Wait up to S seconds for new output, then return",
+        cxxopts::value<double>());
     pos("NAME", "session", cxxopts::value<string>());
     o.parse_positional({"NAME"});
     synopsis = "NAME [OPTION...]";
   } else if (cmd == "sniff") {
-    o.add_options()
-        ("cursor", "Start at byte offset N (default: oldest retained)",
-         cxxopts::value<long long>())
-        ("tail", "Start at the current head (only show new records)")
-        ("follow", "Keep streaming the exchange until interrupted (Ctrl-C)");
+    o.add_options()("cursor",
+                    "Start at byte offset N (default: oldest retained)",
+                    cxxopts::value<long long>())(
+        "tail", "Start at the current head (only show new records)")(
+        "follow", "Keep streaming the exchange until interrupted (Ctrl-C)");
     pos("NAME", "session", cxxopts::value<string>());
     o.parse_positional({"NAME"});
     synopsis = "NAME [OPTION...]";
   } else if (cmd == "wait") {
-    o.add_options()
-        ("idle", "Required quiet period in seconds",
-         cxxopts::value<double>()->default_value("0.5"))
-        ("timeout", "Seconds before giving up",
-         cxxopts::value<double>()->default_value("30"));
+    o.add_options()("idle", "Required quiet period in seconds",
+                    cxxopts::value<double>()->default_value("0.5"))(
+        "timeout", "Seconds before giving up",
+        cxxopts::value<double>()->default_value("30"));
     pos("NAME", "session", cxxopts::value<string>());
     o.parse_positional({"NAME"});
     synopsis = "NAME [OPTION...]";
@@ -156,8 +157,8 @@ cxxopts::Options buildOptions(const string& cmd) {
   } else if (cmd == "writeln") {
     o.add_options()("secret",
                     "Read the line hidden via getpass (e.g. a password)");
-    pos("NAME", "session", cxxopts::value<string>())(
-        "TEXT", "text to send", cxxopts::value<string>());
+    pos("NAME", "session", cxxopts::value<string>())("TEXT", "text to send",
+                                                     cxxopts::value<string>());
     o.parse_positional({"NAME", "TEXT"});
     synopsis = "NAME [TEXT] [--secret]";
   } else if (cmd == "key") {
@@ -171,36 +172,36 @@ cxxopts::Options buildOptions(const string& cmd) {
         "osc133",
         "Force OSC 133 framing (clean scrollback; needs shell integration)")(
         "no-osc133", "Force the echo-marker framing (works on any shell)");
-    pos("NAME", "session", cxxopts::value<string>())(
-        "CMD", "command to run", cxxopts::value<string>());
+    pos("NAME", "session", cxxopts::value<string>())("CMD", "command to run",
+                                                     cxxopts::value<string>());
     o.parse_positional({"NAME", "CMD"});
     synopsis = "NAME CMD [OPTION...]";
   } else if (cmd == "expect") {
-    o.add_options()
-        ("timeout", "Seconds before giving up",
-         cxxopts::value<double>()->default_value("30"))
-        ("from-start", "Also scan retained scrollback, not just new output")
-        ("exact", "Match PATTERN as a literal substring, not a regex")
-        ("cursor", "Scan output from byte offset N (capture it before writing "
-                   "to avoid races)",
-         cxxopts::value<long long>());
+    o.add_options()("timeout", "Seconds before giving up",
+                    cxxopts::value<double>()->default_value("30"))(
+        "from-start", "Also scan retained scrollback, not just new output")(
+        "exact", "Match PATTERN as a literal substring, not a regex")(
+        "cursor",
+        "Scan output from byte offset N (capture it before writing "
+        "to avoid races)",
+        cxxopts::value<long long>());
     pos("NAME", "session", cxxopts::value<string>())(
         "PATTERN", "regex (or literal with --exact)", cxxopts::value<string>());
     o.parse_positional({"NAME", "PATTERN"});
     synopsis = "NAME PATTERN [OPTION...]";
   } else if (cmd == "resize") {
     pos("NAME", "session", cxxopts::value<string>())(
-        "ROWS", "rows", cxxopts::value<int>())(
-        "COLS", "columns", cxxopts::value<int>());
+        "ROWS", "rows", cxxopts::value<int>())("COLS", "columns",
+                                               cxxopts::value<int>());
     o.parse_positional({"NAME", "ROWS", "COLS"});
     synopsis = "NAME ROWS COLS";
   } else if (cmd == "gc") {
-    o.add_options()
-        ("idle",
-         "Also end live sessions idle longer than DUR (e.g. 30m, 6h; "
-         "default 8h)",
-         cxxopts::value<string>()->implicit_value("8h"))
-        ("force", "Stop idle sessions outright, skipping the graceful eof");
+    o.add_options()(
+        "idle",
+        "Also end live sessions idle longer than DUR (e.g. 30m, 6h; "
+        "default 8h)",
+        cxxopts::value<string>()->implicit_value("8h"))(
+        "force", "Stop idle sessions outright, skipping the graceful eof");
     synopsis = "[--idle [DUR]] [--force]";
   }
   o.positional_help("");
@@ -210,41 +211,43 @@ cxxopts::Options buildOptions(const string& cmd) {
 
 // Top-level overview: ET-style header + Usage + a flat, ordered command list.
 void printOverview() {
-  fprintf(stderr,
-          "Control backgrounded Eternal Terminal (et --ctl) sessions\n"
-          "Usage:\n"
-          "  etctl <command> [args]\n"
-          "\n"
-          "  Open a reconnectable session in the background, then read its "
-          "output and\n"
-          "  send it input. Run 'etctl <command> --help' for a command's "
-          "options.\n"
-          "  NAME is a session name (under ~/.et/ctl, or $ETCTL_HOME) or a "
-          "socket path.\n"
-          "\n"
-          "  open        start a control session in the background (idempotent)\n"
-          "  kill        force-stop a session daemon (key NAME eof ends it cleanly)\n"
-          "\n"
-          "  run         run a command; capture its verbatim output + exit code\n"
-          "  read        read output (non-destructive)\n"
-          "  expect      wait for a pattern in the output\n"
-          "  write       inject raw input bytes (no newline)\n"
-          "  writeln     inject a line (or a hidden password)\n"
-          "\n"
-          "  key         inject named keys (arrows, interrupt, eof, ...)\n"
-          "  wait        wait until output goes quiet\n"
-          "\n"
-          "  resize      set terminal size\n"
-          "  sniff       tap the byte exchange (sent + received)\n"
-          "  observe     watch the live screen (read-only)\n"
-          "  attach      attach interactively (Ctrl-] to detach)\n"
-          "\n"
-          "  sessions    list local control sessions\n"
-          "  info        show session status\n"
-          "  gc          remove dead session sockets\n"
-          "\n"
-          "  -h, --help     show this overview (or `etctl <command> --help`)\n"
-          "  -v, --version  print the etctl version\n");
+  fprintf(
+      stderr,
+      "Control backgrounded Eternal Terminal (et --ctl) sessions\n"
+      "Usage:\n"
+      "  etctl <command> [args]\n"
+      "\n"
+      "  Open a reconnectable session in the background, then read its "
+      "output and\n"
+      "  send it input. Run 'etctl <command> --help' for a command's "
+      "options.\n"
+      "  NAME is a session name (under ~/.et/ctl, or $ETCTL_HOME) or a "
+      "socket path.\n"
+      "\n"
+      "  open        start a control session in the background (idempotent)\n"
+      "  kill        force-stop a session daemon (key NAME eof ends it "
+      "cleanly)\n"
+      "\n"
+      "  run         run a command; capture its verbatim output + exit code\n"
+      "  read        read output (non-destructive)\n"
+      "  expect      wait for a pattern in the output\n"
+      "  write       inject raw input bytes (no newline)\n"
+      "  writeln     inject a line (or a hidden password)\n"
+      "\n"
+      "  key         inject named keys (arrows, interrupt, eof, ...)\n"
+      "  wait        wait until output goes quiet\n"
+      "\n"
+      "  resize      set terminal size\n"
+      "  sniff       tap the byte exchange (sent + received)\n"
+      "  observe     watch the live screen (read-only)\n"
+      "  attach      attach interactively (Ctrl-] to detach)\n"
+      "\n"
+      "  sessions    list local control sessions\n"
+      "  info        show session status\n"
+      "  gc          remove dead session sockets\n"
+      "\n"
+      "  -h, --help     show this overview (or `etctl <command> --help`)\n"
+      "  -v, --version  print the etctl version\n");
 }
 
 string resolveSocketPath(const string& nameOrPath) {
@@ -361,7 +364,7 @@ string keyToBytes(const string& key) {
   if (key == "space") return " ";
   if (key == "backspace") return "\x7f";
   if (key == "interrupt") return "\x03";  // Ctrl-C
-  if (key == "eof") return "\x04";         // Ctrl-D (EOF on input)
+  if (key == "eof") return "\x04";        // Ctrl-D (EOF on input)
   if (key == "up") return "\x1b[A";
   if (key == "down") return "\x1b[B";
   if (key == "right") return "\x1b[C";
@@ -375,19 +378,32 @@ string keyToBytes(const string& key) {
   if (key.size() >= 2 && (key[0] == 'f' || key[0] == 'F')) {
     int n = atoi(key.c_str() + 1);
     switch (n) {
-      case 1: return "\x1bOP";
-      case 2: return "\x1bOQ";
-      case 3: return "\x1bOR";
-      case 4: return "\x1bOS";
-      case 5: return "\x1b[15~";
-      case 6: return "\x1b[17~";
-      case 7: return "\x1b[18~";
-      case 8: return "\x1b[19~";
-      case 9: return "\x1b[20~";
-      case 10: return "\x1b[21~";
-      case 11: return "\x1b[23~";
-      case 12: return "\x1b[24~";
-      default: break;
+      case 1:
+        return "\x1bOP";
+      case 2:
+        return "\x1bOQ";
+      case 3:
+        return "\x1bOR";
+      case 4:
+        return "\x1bOS";
+      case 5:
+        return "\x1b[15~";
+      case 6:
+        return "\x1b[17~";
+      case 7:
+        return "\x1b[18~";
+      case 8:
+        return "\x1b[19~";
+      case 9:
+        return "\x1b[20~";
+      case 10:
+        return "\x1b[21~";
+      case 11:
+        return "\x1b[23~";
+      case 12:
+        return "\x1b[24~";
+      default:
+        break;
     }
   }
   // ^X style control char, e.g. "^c" -> 0x03.
@@ -417,25 +433,26 @@ string readAllStdin() {
 // can be unit-tested without a pty; the detection cache and probe below add the
 // stateful, I/O-bound half that only makes sense against a live session.
 
-// Per-session cache of "does this session's prompt speak OSC 133?", a sibling
-// of the session's socket (~/.et/ctl/<name>.osc133). Detection is done once
-// (lazily, on the first run) and reused, since etctl is otherwise stateless per
-// call.
+// Per-session cache of the chosen run framing, a sibling of the session's
+// socket (~/.et/ctl/<name>.osc133). Detection is done once (lazily, on the
+// first run) and reused, since etctl is otherwise stateless per call. The
+// stored value is the resolved RunFraming as an int (see the enum below).
 string osc133CachePath(const string& name) {
   return control_paths::controlDir() + "/" + name + ".osc133";
 }
-// -1 unknown (no cache yet), 0 no integration, 1 integration present.
-int readOsc133Cache(const string& name) {
+// -1 = no cache yet; otherwise the cached RunFraming int (1=mark, 2=eval-osc,
+// 3=bracket-osc).
+int readFramingCache(const string& name) {
   std::ifstream f(osc133CachePath(name));
   if (!f.good()) return -1;
   int v = -1;
   f >> v;
-  return (v == 0 || v == 1) ? v : -1;
+  return (v >= 1 && v <= 3) ? v : -1;
 }
-void writeOsc133Cache(const string& name, bool present) {
+void writeFramingCache(const string& name, int framing) {
   control_paths::ensureControlDir();
   std::ofstream f(osc133CachePath(name));
-  if (f.good()) f << (present ? 1 : 0) << "\n";
+  if (f.good()) f << framing << "\n";
 }
 
 // --- commands ---------------------------------------------------------------
@@ -456,9 +473,8 @@ bool sessionAlive(const string& name) {
 // otherwise asynchronous (eof/kill return before the daemon finishes dying), so
 // a too-soon `open` can see the still-live daemon and no-op.
 bool waitSessionGone(const string& name, double secs) {
-  const auto deadline =
-      std::chrono::steady_clock::now() +
-      std::chrono::milliseconds((long long)(secs * 1000));
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds((long long)(secs * 1000));
   while (sessionAlive(name)) {
     if (std::chrono::steady_clock::now() >= deadline) {
       return false;
@@ -469,8 +485,9 @@ bool waitSessionGone(const string& name, double secs) {
 }
 
 int64_t sessionField(const string& name, const string& key);  // defined below
-int cmdWrite(const string& name, const string& bytes, bool secret);  // defined below
-int cmdKill(const string& name, double waitSecs);                    // defined below
+int cmdWrite(const string& name, const string& bytes,
+             bool secret);                         // defined below
+int cmdKill(const string& name, double waitSecs);  // defined below
 
 // Fetch a session's full info as a key=value map (one CTL_INFO round-trip).
 std::map<string, string> sessionInfo(const string& name) {
@@ -518,10 +535,18 @@ int64_t parseDuration(const string& s, int64_t fallback) {
   if (end == s.c_str()) return fallback;
   int64_t mult = 1;
   switch (*end) {
-    case 'm': mult = 60; break;
-    case 'h': mult = 3600; break;
-    case 'd': mult = 86400; break;
-    default: mult = 1; break;  // 's' or none
+    case 'm':
+      mult = 60;
+      break;
+    case 'h':
+      mult = 3600;
+      break;
+    case 'd':
+      mult = 86400;
+      break;
+    default:
+      mult = 1;
+      break;  // 's' or none
   }
   return (int64_t)(n * (double)mult);
 }
@@ -536,7 +561,8 @@ int cmdGc(int argc, char** argv) {
           "etctl gc [--idle [DUR]] [--force]\n"
           "  Remove dead session sockets (a daemon that has exited leaves a\n"
           "  stale socket).  With --idle, also end live sessions idle longer\n"
-          "  than DUR (default 8h; e.g. 30m, 6h, 2d): eof first, then a forced\n"
+          "  than DUR (default 8h; e.g. 30m, 6h, 2d): eof first, then a "
+          "forced\n"
           "  stop if it doesn't exit within a few seconds.  --force skips the\n"
           "  graceful eof and stops idle sessions outright.\n");
       return 0;
@@ -606,7 +632,8 @@ int cmdSessions() {
     }
     const bool connected = in["connected"] == "1";
     int64_t created = in.count("created") ? atoll(in["created"].c_str()) : -1;
-    int64_t last = in.count("lastActivity") ? atoll(in["lastActivity"].c_str()) : -1;
+    int64_t last =
+        in.count("lastActivity") ? atoll(in["lastActivity"].c_str()) : -1;
     rows.push_back({name,
                     in.count("host") && !in["host"].empty() ? in["host"] : "-",
                     connected ? "connected" : "disconnected",
@@ -796,8 +823,8 @@ int cmdExpect(const string& name, const string& pattern, double timeoutSec,
   // else watch for output produced from now on.  Capturing a cursor (info
   // headCursor) before sending input and passing it here avoids the race where
   // the awaited text lands between the write and a head-anchored expect.
-  int64_t cursor =
-      startCursor >= 0 ? startCursor : (fromStart ? 0 : sessionHeadCursor(name));
+  int64_t cursor = startCursor >= 0 ? startCursor
+                                    : (fromStart ? 0 : sessionHeadCursor(name));
   if (cursor < 0) cursor = 0;
   string acc;
   const auto deadline =
@@ -834,8 +861,8 @@ int cmdSniff(const string& name, bool follow, int64_t startCursor, bool tail) {
   // unambiguous and a script can recover the exact bytes per line.  The cursor
   // lives in the transcript's own offset space (distinct from the scrollback's,
   // so it is not the headCursor `info` reports): -1 (default) is the oldest
-  // retained record, an explicit --cursor offset starts there, and --tail starts
-  // at the current head so only new records show.
+  // retained record, an explicit --cursor offset starts there, and --tail
+  // starts at the current head so only new records show.
   int64_t cursor = startCursor;
   if (tail) {
     // Read once just to learn the current transcript head, discarding records.
@@ -857,7 +884,8 @@ int cmdSniff(const string& name, bool follow, int64_t startCursor, bool tail) {
     }
     TranscriptRead tr = control_proto::decodeTranscriptResp(payload);
     if (tr.truncated && !any) {
-      fprintf(stderr, "etctl: warning: sniff cursor fell behind; gap skipped\n");
+      fprintf(stderr,
+              "etctl: warning: sniff cursor fell behind; gap skipped\n");
     }
     for (const TranscriptRecord& rec : tr.records) {
       any = true;
@@ -871,14 +899,16 @@ int cmdSniff(const string& name, bool follow, int64_t startCursor, bool tail) {
     }
   } while (follow);
   // Report where to resume (transcript-space), so a script can pass it back via
-  // --cursor.  Only meaningful for a one-shot read; --follow never returns here.
+  // --cursor.  Only meaningful for a one-shot read; --follow never returns
+  // here.
   fprintf(stderr, "next-cursor: %lld\n", (long long)cursor);
   return 0;
 }
 
 int cmdWait(const string& name, double idleSec, double timeoutSec) {
   // Return once the session output has been quiet for idleSec, or fail after
-  // timeoutSec. Useful after sending input, to let an app settle before reading.
+  // timeoutSec. Useful after sending input, to let an app settle before
+  // reading.
   int64_t cursor = sessionHeadCursor(name);
   if (cursor < 0) cursor = 0;
   const auto start = std::chrono::steady_clock::now();
@@ -950,10 +980,11 @@ int cmdAttach(const string& name, bool readOnly, int64_t startCursor,
    * Ctrl-] detaches locally without forwarding it or ending the session.  In
    * attach (read-write) mode every other key (Ctrl-C, Ctrl-D, ...) is forwarded
    * to the remote, so use Ctrl-] to leave; in observe (read-only) mode input is
-   * swallowed and Ctrl-C also detaches, since there is nothing to forward it to.
+   * swallowed and Ctrl-C also detaches, since there is nothing to forward it
+   * to.
    */
-  const char kDetach = 0x1d;   // Ctrl-]
-  const char kIntr = 0x03;     // Ctrl-C (a local quit in read-only observe)
+  const char kDetach = 0x1d;  // Ctrl-]
+  const char kIntr = 0x03;    // Ctrl-C (a local quit in read-only observe)
   const char* detachHint = readOnly ? "Ctrl-C or Ctrl-]" : "Ctrl-]";
   fprintf(stderr, "[etctl %s '%s' -- press %s to detach]\r\n",
           readOnly ? "observe" : "attach", name.c_str(), detachHint);
@@ -1035,32 +1066,31 @@ int cmdAttach(const string& name, bool readOnly, int64_t startCursor,
 int cmdAttach(const string& name, bool readOnly, int64_t startCursor,
               bool resize);
 
-// How `run` brackets a command to find its output and exit code.
-//   kMark   -- inject `echo <mark> ... echo <mark>:$?` (works on any shell).
-//   kOsc133 -- rely on the prompt's own OSC 133 C/D marks (clean scrollback,
-//              needs shell integration on the far side).
-//   kAuto   -- kOsc133 if the session's prompt speaks OSC 133 (detected once
-//   and
-//              cached), else kMark.
-enum class RunFraming { kAuto, kMark, kOsc133 };
+// How `run` injects a command and finds its output + exit code.
+//   kMark          -- inject `echo <mark>; eval "$(cat<<BODY..)"; echo
+//   <mark>:$?`
+//                     and parse the echoed markers (works on any line shell).
+//   kEvalOsc133    -- inject the eval here-doc, read the prompt's own OSC 133
+//                     C/D marks (no injected echoes; needs OSC 133
+//                     integration).
+//   kBracketOsc133 -- inject the *bare* command via bracketed paste
+//                     (\e[200~..\e[201~) and read OSC 133 marks. The real
+//                     command shows in the scrollback -- no wrapper, no markers
+//                     -- so this is the cleanest; needs OSC 133 *and* a
+//                     bracketed-paste-aware line editor.
+//   kAuto          -- detect the far-side prompt's capabilities once (cached)
+//                     and pick the cleanest of the three.
+enum class RunFraming { kAuto, kMark, kEvalOsc133, kBracketOsc133 };
 
-// Detect whether the session's prompt emits OSC 133 marks. Types one harmless
-// command and watches the raw stream for a D mark (which precmd emits once the
-// command finishes). Returns as soon as a D arrives; concludes "no integration"
-// a short grace after the command has demonstrably run (its sentinel echoed
-// back as both input and output). Run once per session by runCommand and
-// cached.
-bool probeOsc133(const string& name, double timeoutSec) {
-  string tag;
-  std::random_device rd;
-  static const char* kHex = "0123456789abcdef";
-  for (int i = 0; i < 8; i++) tag.push_back(kHex[rd() % 16]);
-  const string sentinel = "ETCTL_OSCPROBE_" + tag;
-
+// Send `framed` and read the raw stream until this probe's D mark arrives (or a
+// short grace after its sentinel has echoed twice, or the deadline). Returns
+// the accumulated bytes for the caller to inspect. Captures from a fresh cursor
+// so back-to-back probes don't see each other's output.
+string probeRead(const string& name, const string& framed,
+                 const string& sentinel, double timeoutSec) {
   int64_t cursor = sessionHeadCursor(name);
   if (cursor < 0) cursor = 0;
-  if (cmdWrite(name, "printf '" + sentinel + "\\n'\n") != 0) return false;
-
+  if (cmdWrite(name, framed) != 0) return "";
   const std::regex sentRe(sentinel);
   string acc;
   const auto hardDeadline =
@@ -1068,6 +1098,8 @@ bool probeOsc133(const string& name, double timeoutSec) {
       std::chrono::milliseconds((long long)(timeoutSec * 1000));
   bool graced = false;
   auto graceDeadline = hardDeadline;
+  bool sawD = false;
+  auto postD = hardDeadline;
   while (std::chrono::steady_clock::now() < hardDeadline) {
     uint8_t op = 0;
     string payload;
@@ -1078,81 +1110,129 @@ bool probeOsc133(const string& name, double timeoutSec) {
     ScrollbackRead r = control_proto::decodeReadResp(payload);
     cursor = r.nextCursor;
     acc += r.data;
-    if (std::regex_search(acc, kOsc133D))
-      return true;  // integration present (a D mark, with or without a code)
-    if (!graced) {
-      // Two sentinel hits == echoed input + printed output, so the command has
-      // run; give the prompt a brief grace to emit D before concluding "no".
+    if (!sawD && std::regex_search(acc, kOsc133D)) {
+      // Read a beat past D to catch the next prompt's bracketed-paste toggle.
+      sawD = true;
+      postD = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    }
+    if (sawD && std::chrono::steady_clock::now() >= postD) break;
+    if (!sawD && !graced) {
       const auto count =
           std::distance(std::sregex_iterator(acc.begin(), acc.end(), sentRe),
                         std::sregex_iterator());
-      if (count >= 2) {
+      if (count >= 2) {  // echoed input + printed output => command ran
         graced = true;
         graceDeadline =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
       }
     }
-    if (graced && std::chrono::steady_clock::now() >= graceDeadline) break;
+    if (!sawD && graced && std::chrono::steady_clock::now() >= graceDeadline)
+      break;
     ::usleep(40 * 1000);
   }
-  return false;
+  return acc;
+}
+
+// Detect the cleanest framing the session's prompt supports, and confirm it.
+// First disables history expansion once (a control session is script-driven, so
+// a bare `!` pasted as a command would only history-expand and corrupt or hang
+// it; the eval here-doc is immune, but bracketed paste is not). Then:
+//   1. a normal probe -- no D mark => no OSC 133 => kMark; a D but no
+//   bracketed-
+//      paste toggle (\e[?2004h/l) => kEvalOsc133;
+//   2. if bracketed paste looks available, a *bracketed* probe that must come
+//      back as a clean C..D with the sentinel -- only then kBracketOsc133. This
+//      proves the paste path actually works rather than assuming it from the
+//      toggle (a quirky integration could advertise paste yet not fire C for a
+//      pasted command), falling back to kEvalOsc133 otherwise.
+// Run once per session by runCommand and cached.
+RunFraming detectFraming(const string& name, double timeoutSec) {
+  cmdWrite(name, "setopt no_bang_hist 2>/dev/null; set +H 2>/dev/null\n");
+
+  std::random_device rd;
+  static const char* kHex = "0123456789abcdef";
+  auto newSentinel = [&]() {
+    string tag;
+    for (int i = 0; i < 8; i++) tag.push_back(kHex[rd() % 16]);
+    return "ETCTL_OSCPROBE_" + tag;
+  };
+
+  const string s1 = newSentinel();
+  const string acc1 =
+      probeRead(name, "printf '" + s1 + "\\n'\n", s1, timeoutSec);
+  if (!std::regex_search(acc1, kOsc133D)) return RunFraming::kMark;
+  if (acc1.find("\x1b[?2004") == string::npos) return RunFraming::kEvalOsc133;
+
+  const string s2 = newSentinel();
+  const string acc2 = probeRead(
+      name, "\x1b[200~printf '" + s2 + "\\n'\x1b[201~\r", s2, timeoutSec);
+  string body;
+  int code = 0;
+  if (extractOsc133(acc2, &body, &code) && body.find(s2) != string::npos)
+    return RunFraming::kBracketOsc133;
+  return RunFraming::kEvalOsc133;
 }
 
 /*
- * run(): send a command and collect its output verbatim + real exit code, the
- * way etch.run does.  We frame the command with unique start/end markers
- * (echoed by the shell) and parse the exit code printed after it; the body
- * between the markers is passed through untouched -- ANSI colors, control
- * bytes, and the pty's own CR all survive, so `run` is an 8-bit-clean pipe.
- * This assumes a cooperating line-oriented shell on the far side; full-screen
- * output is for read/observe.  If `bodyOut` is non-null the body is captured
- * there; otherwise it is written to stdout.  (Validated against a live et
- * session, not the in-process echo harness, which does not execute commands.)
+ * run(): send a command and collect its output verbatim + real exit code.
+ * Three framings, cheapest-scrollback first (see RunFraming):
+ *  - kBracketOsc133 types the *bare* command inside bracketed paste, so the
+ *    real command shows in the scrollback with no wrapper and no markers, and
+ *    reads the boundaries + exit code from the prompt's OSC 133 C/D marks.
+ *  - kEvalOsc133 injects the eval here-doc (below) and also reads OSC 133 --
+ *    for an OSC 133 prompt whose line editor lacks bracketed paste.
+ *  - kMark injects the eval here-doc bracketed by `echo <mark> ... <mark>:$?`
+ *    and parses those -- the universal fallback for a shell with no OSC 133.
+ * The eval here-doc hands the body to `eval` as *data*, never source the line
+ * reader parses, so it is syntactically complete and immune to the body's own
+ * quotes/braces/`!`/parse errors; bracketed paste gets the same multi-line and
+ * metacharacter safety from the paste, minus a here-doc's collision-proofing
+ * (so a body literally containing the paste terminator falls back to eval).
+ * If `bodyOut` is non-null the body is captured there; else it goes to stdout.
  */
 int runCommand(const string& name, const string& command, double timeoutSec,
                string* bodyOut, RunFraming framing = RunFraming::kAuto) {
-  // Resolve kAuto once, using the per-session cache; probe lazily on the first
+  // Empty / whitespace-only body: a no-op. Short-circuit so bracketed paste
+  // does not submit a blank line (which runs nothing and emits no C/D mark).
+  if (command.find_first_not_of(" \t\r\n") == string::npos) {
+    if (bodyOut) bodyOut->clear();
+    return 0;
+  }
+
+  // Resolve kAuto once, using the per-session cache; detect lazily on the first
   // run (etctl is stateless per call, so the result is cached beside the
   // socket).
   if (framing == RunFraming::kAuto) {
-    int cached = readOsc133Cache(name);
+    int cached = readFramingCache(name);
     if (cached < 0) {
-      const bool present = probeOsc133(name, 3.0);
-      writeOsc133Cache(name, present);
-      cached = present ? 1 : 0;
+      framing = detectFraming(name, 3.0);
+      writeFramingCache(name, (int)framing);
+    } else {
+      framing = (RunFraming)cached;
     }
-    framing = cached == 1 ? RunFraming::kOsc133 : RunFraming::kMark;
   }
+
+  const bool oscRead = (framing == RunFraming::kBracketOsc133 ||
+                        framing == RunFraming::kEvalOsc133);
+  // Inject bare via bracketed paste only when the prompt supports it AND the
+  // body cannot collide with the paste terminator; otherwise the eval here-doc.
+  const bool useBracket = (framing == RunFraming::kBracketOsc133) &&
+                          command.find("\x1b[201~") == string::npos;
 
   string tag;
   std::random_device rd;
   static const char* kHex = "0123456789abcdef";
   for (int i = 0; i < 8; i++) tag.push_back(kHex[rd() % 16]);
-  // Here-doc delimiter for the body, kept distinct from any marker prefix so no
-  // marker regex can match the delimiter line the pty echoes back.
-  const string bodyMark = "ETCTL_BODY_" + tag;
-  const string mark = "ETCTL_" + tag;  // used only by the kMark framing
+  const string bodyMark = "ETCTL_BODY_" + tag;  // here-doc delimiter
+  const string mark = "ETCTL_" + tag;           // used only by kMark
 
   int64_t cursor = sessionHeadCursor(name);
   if (cursor < 0) cursor = 0;
 
-  // Both framings wrap the body in `eval "$(cat <<'BODY' ... BODY)"`: the body
-  // is handed to `eval` as *data*, never source the interactive line reader
-  // parses, so the typed line is always syntactically complete and carries none
-  // of the body's own syntax. A parse error fails at eval *runtime* (no frame
-  // desync / hang); history expansion ('!') and glob/brace/quote metacharacters
-  // are inert inside the quoted here-doc; `eval` runs in the current shell so
-  // cd/export persist; and `cat`'s here-doc lives in the command-sub subshell,
-  // leaving the body's stdin (fd 0) on the pty. (`eval "$(cat)"` over `.
-  // /dev/fd/N` avoids needing a /dev/fd entry, absent on e.g. FreeBSD without
-  // fdescfs.)
-  //
-  // kMark brackets the eval with `echo <mark> ... echo <mark>:$?` and parses
-  // those. kOsc133 types only the eval and reads the prompt's own OSC 133 C
-  // (output start) and D;<exit> (done) marks -- no injected echoes, so the
-  // scrollback stays clean and the exit code comes straight from D.
   string framed;
-  if (framing == RunFraming::kOsc133) {
+  if (useBracket) {
+    framed = "\x1b[200~" + command + "\x1b[201~\r";
+  } else if (oscRead) {
     framed = "eval \"$(cat <<'" + bodyMark + "'\n" + command + "\n" + bodyMark +
              "\n)\"\n";
   } else {
@@ -1166,13 +1246,14 @@ int runCommand(const string& name, const string& command, double timeoutSec,
   // kMark markers: the end marker "<mark>:<code>\n" is anchored on the trailing
   // newline so a chunked read never matches a truncated code, and the start
   // marker "<mark>\r?\n" ignores the echoed command and zsh's OSC window-title
-  // (both of which also contain <mark>). Unused by kOsc133.
+  // (both of which also contain <mark>). Unused by the OSC framings.
   std::regex endRe(mark + ":([0-9]+)\\r?\\n");
   std::regex startRe(mark + "\\r?\\n");
   string acc;
+  const auto typedAt = std::chrono::steady_clock::now();
   const auto deadline =
-      std::chrono::steady_clock::now() +
-      std::chrono::milliseconds((long long)(timeoutSec * 1000));
+      typedAt + std::chrono::milliseconds((long long)(timeoutSec * 1000));
+  bool sawC = false;
   while (std::chrono::steady_clock::now() < deadline) {
     uint8_t op = 0;
     string payload;
@@ -1187,7 +1268,7 @@ int runCommand(const string& name, const string& command, double timeoutSec,
     string body;
     int code = 0;
     bool done = false;
-    if (framing == RunFraming::kOsc133) {
+    if (oscRead) {
       done = extractOsc133(acc, &body, &code);
     } else {
       std::smatch m;
@@ -1212,6 +1293,25 @@ int runCommand(const string& name, const string& command, double timeoutSec,
       }
       return code;
     }
+    // Continuation guard (bracketed inject only). preexec emits C the instant a
+    // command is *accepted*, before it runs -- so a slow command still shows C
+    // quickly. If no C has appeared shortly after typing, the shell never
+    // accepted the line: it is parked on a continuation prompt (an unbalanced
+    // quote or an incomplete construct in the pasted body). Recover with Ctrl-C
+    // rather than hang to the full timeout. (Once C is seen we wait normally,
+    // so a legitimately slow command is never interrupted.)
+    if (useBracket && !sawC) {
+      if (std::regex_search(acc, kOsc133C)) {
+        sawC = true;
+      } else if (std::chrono::steady_clock::now() - typedAt >
+                 std::chrono::milliseconds(2000)) {
+        cmdWrite(name, "\x03");  // Ctrl-C to abort the continuation prompt
+        fprintf(stderr,
+                "etctl: command looks incomplete (shell parked on a "
+                "continuation prompt); aborted\n");
+        return 125;
+      }
+    }
     ::usleep(80 * 1000);
   }
   fprintf(stderr, "etctl: run timed out after %.1fs\n", timeoutSec);
@@ -1231,8 +1331,8 @@ int cmdOpen(int argc, char** argv) {
    * translates it to et's --name.  The call is idempotent: if NAME is already a
    * live session, do nothing.  That makes `open` a cheap "ensure this session
    * exists" step you can safely run before driving it, which is the clean
-   * version of etch's autospawn -- the connection details live only here, not on
-   * every command.
+   * version of etch's autospawn -- the connection details live only here, not
+   * on every command.
    */
   if (argc < 3) {
     fprintf(stderr,
@@ -1375,8 +1475,8 @@ int main(int argc, char** argv) {
       if (a == "-h" || a == "--help") {
         // open parses argv itself (NAME + et passthrough), so build its cxxopts
         // Options inline to render descFor + Usage + -h exactly as the other
-        // verbs do; the `...` passthrough (not a real option) is appended in the
-        // same column so the options block reads as one.
+        // verbs do; the `...` passthrough (not a real option) is appended in
+        // the same column so the options block reads as one.
         cxxopts::Options opts("etctl open", descFor("open"));
         opts.add_options()("h,help", "Print help");
         opts.positional_help("");
@@ -1435,12 +1535,13 @@ int main(int argc, char** argv) {
   if (cmd == "read") {
     int64_t cursor = res.count("cursor") ? res["cursor"].as<long long>() : -1;
     double timeout = res.count("timeout") ? res["timeout"].as<double>() : 0.0;
-    return cmdRead(name, cursor, res.count("strip") > 0, res.count("follow") > 0,
-                   timeout);
+    return cmdRead(name, cursor, res.count("strip") > 0,
+                   res.count("follow") > 0, timeout);
   }
   if (cmd == "sniff") {
     int64_t cursor = res.count("cursor") ? res["cursor"].as<long long>() : -1;
-    return cmdSniff(name, res.count("follow") > 0, cursor, res.count("tail") > 0);
+    return cmdSniff(name, res.count("follow") > 0, cursor,
+                    res.count("tail") > 0);
   }
   if (cmd == "wait") {
     return cmdWait(name, res["idle"].as<double>(), res["timeout"].as<double>());
@@ -1448,7 +1549,8 @@ int main(int argc, char** argv) {
   if (cmd == "write") {
     // TEXT arg if given, else stdin; raw bytes, no trailing newline.  A hidden
     // secret belongs on writeln (a password needs the submitting newline).
-    string bytes = res.count("TEXT") ? res["TEXT"].as<string>() : readAllStdin();
+    string bytes =
+        res.count("TEXT") ? res["TEXT"].as<string>() : readAllStdin();
     return cmdWrite(name, bytes);
   }
   if (cmd == "writeln") {
@@ -1479,7 +1581,7 @@ int main(int argc, char** argv) {
     }
     RunFraming framing = RunFraming::kAuto;
     if (res.count("osc133")) {
-      framing = RunFraming::kOsc133;
+      framing = RunFraming::kBracketOsc133;
     } else if (res.count("no-osc133")) {
       framing = RunFraming::kMark;
     }
