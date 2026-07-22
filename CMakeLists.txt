@@ -727,10 +727,21 @@ if(NOT CPACK_GENERATOR)
 endif()
 
 SET(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${CMAKE_SOURCE_DIR}/debian/postinst;${CMAKE_SOURCE_DIR}/debian/postrm;${CMAKE_SOURCE_DIR}/debian/prerm")
-SET(CPACK_INSTALLED_DIRECTORIES "${CMAKE_SOURCE_DIR}/systemctl;/lib/systemd/system" "${CMAKE_SOURCE_DIR}/etc;/etc")
+SET(CPACK_INSTALLED_DIRECTORIES "${CMAKE_SOURCE_DIR}/systemctl;/usr/lib/systemd/system" "${CMAKE_SOURCE_DIR}/etc;/etc")
 SET(CPACK_DEBIAN_PACKAGE_MAINTAINER "Unmaintained")
 SET(CPACK_DEBIAN_PACKAGE_DEPENDS "libprotobuf-dev, libc6 (>= 2.34), libgcc-s1 (>= 3.3.1), libstdc++6 (>= 12), libutempter0 (>= 1.1.5)")
 SET(CPACK_DEBIAN_PACKAGE_SUGGESTS "systemd")
+
+# RPM naming: mirror the Homebrew bottle identity (et-<version>-etctl.N) instead of
+# the CPack default (EternalTerminal-<version>-Linux). RPM forbids '-' in Version and
+# Release, so the fork revision rides in the Release field: name "et" + version "7.0.0"
+# + release "etctl.6" produces et-7.0.0-etctl.6.<arch>.rpm. Bump ET_PACKAGE_REVISION in
+# lockstep with the "version" in the tap formula (Formula/et.rb).
+set(ET_PACKAGE_REVISION "etctl.6" CACHE STRING
+  "Fork package revision used as the RPM Release field, e.g. etctl.6")
+set(CPACK_RPM_PACKAGE_NAME "et")
+set(CPACK_RPM_PACKAGE_RELEASE "${ET_PACKAGE_REVISION}")
+set(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
 
 # This must always be last!
 include(CPack)
