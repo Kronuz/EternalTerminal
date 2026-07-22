@@ -252,6 +252,20 @@ process can tell which named control session it is running under. The socket
 lives at `~/.et/ctl/<name>.sock` (`0700` dir, `0600` socket, owning-uid only);
 set `$ETCTL_HOME` to relocate it.
 
+### How `run` frames a command
+
+`run` has to know where a command's output starts and ends and what it exited
+with. By default it brackets the command with lightweight echo markers. When the
+remote shell has FinalTerm/iTerm2 shell integration (the OSC 133 `C`/`D` command
+marks, as emitted by the official bash, zsh, fish, tcsh, and xonsh integrations,
+or any compatible prompt), `run` uses those marks instead: nothing is injected
+into the scrollback and the exit code is read straight from the `D` mark. It also
+trims the prompt-prep sequences a shell splices around the output (a zsh/fish
+end-of-line mark, iTerm2's `OSC 1337` context report, a title, bracketed-paste
+toggles) so the captured output is the command's alone. Detection is automatic
+and cached per session (`~/.et/ctl/<name>.osc133`); force it with `--osc133` or
+fall back to the echo markers with `--no-osc133`.
+
 Run `etctl` with no arguments for the full verb list, `etctl <verb> --help` for
 any verb's options, and `etctl --version` for the version. `--ctl` is not
 available on Windows.

@@ -18,6 +18,7 @@
 #include "ControlProtocol.hpp"
 #include "ETerminal.pb.h"
 #include "Headers.hpp"
+#include "Osc133.hpp"
 
 using namespace et;
 
@@ -107,7 +108,10 @@ cxxopts::Options buildOptions(const string& cmd) {
     synopsis = "NAME [TEXT] [--secret]";
   } else if (cmd == "run") {
     o.add_options()("timeout", "Seconds before giving up",
-                    cxxopts::value<double>()->default_value("60"));
+                    cxxopts::value<double>()->default_value("60"))(
+        "osc133",
+        "Force OSC 133 framing (clean scrollback; needs shell integration)")(
+        "no-osc133", "Force the echo-marker framing (works on any shell)");
     pos("NAME", "session", cxxopts::value<string>())(
         "CMD", "command to run", cxxopts::value<string>());
     o.parse_positional({"NAME", "CMD"});
@@ -251,6 +255,32 @@ string readAllStdin() {
     data.append(buf, rc);
   }
   return data;
+}
+
+// --- OSC 133 semantic-prompt support -------------------------------------
+// The pure OSC-133 parsing (regexes + extractOsc133) lives in Osc133.hpp so it
+// can be unit-tested without a pty; the detection cache and probe below add the
+// stateful, I/O-bound half that only makes sense against a live session.
+
+// Per-session cache of "does this session's prompt speak OSC 133?", a sibling
+// of the session's socket (~/.et/ctl/<name>.osc133). Detection is done once
+// (lazily, on the first run) and reused, since etctl is otherwise stateless per
+// call.
+string osc133CachePath(const string& name) {
+  return control_paths::controlDir() + "/" + name + ".osc133";
+}
+// -1 unknown (no cache yet), 0 no integration, 1 integration present.
+int readOsc133Cache(const string& name) {
+  std::ifstream f(osc133CachePath(name));
+  if (!f.good()) return -1;
+  int v = -1;
+  f >> v;
+  return (v == 0 || v == 1) ? v : -1;
+}
+void writeOsc133Cache(const string& name, bool present) {
+  control_paths::ensureControlDir();
+  std::ofstream f(osc133CachePath(name));
+  if (f.good()) f << (present ? 1 : 0) << "\n";
 }
 
 // --- commands ---------------------------------------------------------------
@@ -400,6 +430,8 @@ int cmdGc(int argc, char** argv) {
       fprintf(stderr, "etctl gc: could not remove %s: %s\n", path.c_str(),
               strerror(errno));
     }
+    // Drop the session's OSC-133 detection cache along with its socket.
+    ::unlink(osc133CachePath(name).c_str());
   }
   return 0;
 }
@@ -606,65 +638,139 @@ int cmdExpect(const string& name, const string& pattern, double timeoutSec,
   return 1;
 }
 
-/*
- * run(): send a command and collect its output verbatim + real exit code, the way
- * etch.run does.  We frame the command with unique start/end markers (echoed by the
- * shell) and parse the exit code printed after it; the body between the markers is
- * passed through untouched -- ANSI colors, control bytes, and the pty's own CR all
- * survive, so `run` is an 8-bit-clean pipe.  This assumes a cooperating line-oriented
- * shell on the far side.  If `bodyOut` is non-null the body is captured there;
- * otherwise it is written to stdout.  (Validated against a live et session, not the
- * in-process echo harness, which does not execute commands.)
- */
-int runCommand(const string& name, const string& command, double timeoutSec,
-               string* bodyOut) {
+// How `run` brackets a command to find its output and exit code.
+//   kMark   -- inject `echo <mark> ... echo <mark>:$?` (works on any shell).
+//   kOsc133 -- rely on the prompt's own OSC 133 C/D marks (clean scrollback,
+//              needs shell integration on the far side).
+//   kAuto   -- kOsc133 if the session's prompt speaks OSC 133 (detected once
+//   and
+//              cached), else kMark.
+enum class RunFraming { kAuto, kMark, kOsc133 };
+
+// Detect whether the session's prompt emits OSC 133 marks. Types one harmless
+// command and watches the raw stream for a D mark (which precmd emits once the
+// command finishes). Returns as soon as a D arrives; concludes "no integration"
+// a short grace after the command has demonstrably run (its sentinel echoed
+// back as both input and output). Run once per session by runCommand and
+// cached.
+bool probeOsc133(const string& name, double timeoutSec) {
   string tag;
   std::random_device rd;
   static const char* kHex = "0123456789abcdef";
   for (int i = 0; i < 8; i++) tag.push_back(kHex[rd() % 16]);
-  const string mark = "ETCTL_" + tag;
-  // Here-doc delimiter for the body, kept distinct from `mark` (a different
-  // prefix, not just a different suffix) so neither marker regex can ever
-  // match the delimiter line that the pty echoes back.
+  const string sentinel = "ETCTL_OSCPROBE_" + tag;
+
+  int64_t cursor = sessionHeadCursor(name);
+  if (cursor < 0) cursor = 0;
+  if (cmdWrite(name, "printf '" + sentinel + "\\n'\n") != 0) return false;
+
+  const std::regex sentRe(sentinel);
+  string acc;
+  const auto hardDeadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::milliseconds((long long)(timeoutSec * 1000));
+  bool graced = false;
+  auto graceDeadline = hardDeadline;
+  while (std::chrono::steady_clock::now() < hardDeadline) {
+    uint8_t op = 0;
+    string payload;
+    if (!oneShot(name, CTL_READ, control_proto::encodeCursor(cursor), &op,
+                 &payload)) {
+      break;
+    }
+    ScrollbackRead r = control_proto::decodeReadResp(payload);
+    cursor = r.nextCursor;
+    acc += r.data;
+    if (std::regex_search(acc, kOsc133D))
+      return true;  // integration present (a D mark, with or without a code)
+    if (!graced) {
+      // Two sentinel hits == echoed input + printed output, so the command has
+      // run; give the prompt a brief grace to emit D before concluding "no".
+      const auto count =
+          std::distance(std::sregex_iterator(acc.begin(), acc.end(), sentRe),
+                        std::sregex_iterator());
+      if (count >= 2) {
+        graced = true;
+        graceDeadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
+      }
+    }
+    if (graced && std::chrono::steady_clock::now() >= graceDeadline) break;
+    ::usleep(40 * 1000);
+  }
+  return false;
+}
+
+/*
+ * run(): send a command and collect its output verbatim + real exit code, the
+ * way etch.run does.  We frame the command with unique start/end markers
+ * (echoed by the shell) and parse the exit code printed after it; the body
+ * between the markers is passed through untouched -- ANSI colors, control
+ * bytes, and the pty's own CR all survive, so `run` is an 8-bit-clean pipe.
+ * This assumes a cooperating line-oriented shell on the far side; full-screen
+ * output is for read/observe.  If `bodyOut` is non-null the body is captured
+ * there; otherwise it is written to stdout.  (Validated against a live et
+ * session, not the in-process echo harness, which does not execute commands.)
+ */
+int runCommand(const string& name, const string& command, double timeoutSec,
+               string* bodyOut, RunFraming framing = RunFraming::kAuto) {
+  // Resolve kAuto once, using the per-session cache; probe lazily on the first
+  // run (etctl is stateless per call, so the result is cached beside the
+  // socket).
+  if (framing == RunFraming::kAuto) {
+    int cached = readOsc133Cache(name);
+    if (cached < 0) {
+      const bool present = probeOsc133(name, 3.0);
+      writeOsc133Cache(name, present);
+      cached = present ? 1 : 0;
+    }
+    framing = cached == 1 ? RunFraming::kOsc133 : RunFraming::kMark;
+  }
+
+  string tag;
+  std::random_device rd;
+  static const char* kHex = "0123456789abcdef";
+  for (int i = 0; i < 8; i++) tag.push_back(kHex[rd() % 16]);
+  // Here-doc delimiter for the body, kept distinct from any marker prefix so no
+  // marker regex can match the delimiter line the pty echoes back.
   const string bodyMark = "ETCTL_BODY_" + tag;
+  const string mark = "ETCTL_" + tag;  // used only by the kMark framing
 
   int64_t cursor = sessionHeadCursor(name);
   if (cursor < 0) cursor = 0;
 
-  // Echo the start marker, eval the body, echo the end marker + $?.  The body
-  // is captured by `cat` from a *quoted* here-doc and handed to `eval` as a
-  // string -- i.e. data, never source the interactive line reader parses.  So
-  // the control line we type is always syntactically complete and carries none
-  // of the body's own syntax:
-  //   - a parse error in the body fails at eval *runtime* -- the end marker
-  //     still prints (non-zero code) instead of desyncing the frame, no hang;
-  //   - history expansion ('!') and glob/brace/quote metacharacters are inert,
-  //     since a quoted here-doc suppresses all expansion of its content (a bare
-  //     '!.]'-style glob used to trip zsh's "event not found").
-  // `eval` runs in the current shell, so cd/export still persist across runs.
-  // We use `eval "$(cat <<...)"` rather than `. /dev/fd/N` because it needs no
-  // /dev/fd entry (absent on e.g. FreeBSD without fdescfs) and keeps the body's
-  // stdin (fd 0) on the pty: `cat` reads the here-doc in the command-sub
-  // subshell, never touching the outer shell's fd 0.  The open '$(' + here-doc
-  // also keeps the first line incomplete, so a line-editing shell waits for the
-  // whole body.
-  string framed = "echo " + mark + "; eval \"$(cat <<'" + bodyMark + "'\n" +
-                  command + "\n" + bodyMark + "\n)\"; echo " + mark + ":$?\n";
+  // Both framings wrap the body in `eval "$(cat <<'BODY' ... BODY)"`: the body
+  // is handed to `eval` as *data*, never source the interactive line reader
+  // parses, so the typed line is always syntactically complete and carries none
+  // of the body's own syntax. A parse error fails at eval *runtime* (no frame
+  // desync / hang); history expansion ('!') and glob/brace/quote metacharacters
+  // are inert inside the quoted here-doc; `eval` runs in the current shell so
+  // cd/export persist; and `cat`'s here-doc lives in the command-sub subshell,
+  // leaving the body's stdin (fd 0) on the pty. (`eval "$(cat)"` over `.
+  // /dev/fd/N` avoids needing a /dev/fd entry, absent on e.g. FreeBSD without
+  // fdescfs.)
+  //
+  // kMark brackets the eval with `echo <mark> ... echo <mark>:$?` and parses
+  // those. kOsc133 types only the eval and reads the prompt's own OSC 133 C
+  // (output start) and D;<exit> (done) marks -- no injected echoes, so the
+  // scrollback stays clean and the exit code comes straight from D.
+  string framed;
+  if (framing == RunFraming::kOsc133) {
+    framed = "eval \"$(cat <<'" + bodyMark + "'\n" + command + "\n" + bodyMark +
+             "\n)\"\n";
+  } else {
+    framed = "echo " + mark + "; eval \"$(cat <<'" + bodyMark + "'\n" +
+             command + "\n" + bodyMark + "\n)\"; echo " + mark + ":$?\n";
+  }
   if (cmdWrite(name, framed) != 0) {
     return 2;
   }
 
-  // The end marker is "<mark>:<code>\n". Anchoring on the trailing newline
-  // (\r? tolerates the PTY's ONLCR) ensures we only match once the *whole* exit
-  // code has arrived; without it, a chunked read could match a truncated code.
-  // It also skips the echoed command and zsh's OSC window-title (both contain
-  // "<mark>:$?" -- no digit after ':' -- which never matches here).
+  // kMark markers: the end marker "<mark>:<code>\n" is anchored on the trailing
+  // newline so a chunked read never matches a truncated code, and the start
+  // marker "<mark>\r?\n" ignores the echoed command and zsh's OSC window-title
+  // (both of which also contain <mark>). Unused by kOsc133.
   std::regex endRe(mark + ":([0-9]+)\\r?\\n");
-  // The start marker is the line the start echo prints, "<mark>\r?\n".  <mark>
-  // also appears earlier -- in the echoed command and in zsh's OSC window-title
-  // escape ("\e]2;echo <mark>...\a") -- but only the real output line has <mark>
-  // immediately followed by a newline, so anchor on that (a bare find would land
-  // in the title; the colored echo splits <mark> per character and never matches).
   std::regex startRe(mark + "\\r?\\n");
   string acc;
   const auto deadline =
@@ -681,17 +787,27 @@ int runCommand(const string& name, const string& command, double timeoutSec,
     cursor = r.nextCursor;
     acc += r.data;
 
-    std::smatch m;
-    if (std::regex_search(acc, m, endRe)) {
-      int code = atoi(m[1].str().c_str());
-      size_t endPos = (size_t)m.position(0);
-      std::smatch sm;
-      size_t bodyStart = 0;
-      if (std::regex_search(acc, sm, startRe) &&
-          (size_t)sm.position(0) < endPos) {
-        bodyStart = (size_t)sm.position(0) + sm.length(0);
+    string body;
+    int code = 0;
+    bool done = false;
+    if (framing == RunFraming::kOsc133) {
+      done = extractOsc133(acc, &body, &code);
+    } else {
+      std::smatch m;
+      if (std::regex_search(acc, m, endRe)) {
+        code = atoi(m[1].str().c_str());
+        size_t endPos = (size_t)m.position(0);
+        std::smatch sm;
+        size_t bodyStart = 0;
+        if (std::regex_search(acc, sm, startRe) &&
+            (size_t)sm.position(0) < endPos) {
+          bodyStart = (size_t)sm.position(0) + sm.length(0);
+        }
+        body = acc.substr(bodyStart, endPos - bodyStart);
+        done = true;
       }
-      string body = acc.substr(bodyStart, endPos - bodyStart);
+    }
+    if (done) {
       if (bodyOut) {
         *bodyOut = body;
       } else {
@@ -705,8 +821,9 @@ int runCommand(const string& name, const string& command, double timeoutSec,
   return 124;
 }
 
-int cmdRun(const string& name, const string& command, double timeoutSec) {
-  return runCommand(name, command, timeoutSec, nullptr);
+int cmdRun(const string& name, const string& command, double timeoutSec,
+           RunFraming framing = RunFraming::kAuto) {
+  return runCommand(name, command, timeoutSec, nullptr, framing);
 }
 
 int cmdOpen(int argc, char** argv) {
@@ -786,6 +903,10 @@ int cmdOpen(int argc, char** argv) {
             existingHost.empty() ? "?" : existingHost.c_str());
     return 0;
   }
+
+  // Establishing a fresh session under this name: drop any stale OSC-133
+  // detection a previous session left behind, so the first run re-probes.
+  ::unlink(osc133CachePath(name).c_str());
 
   string etPath = "et";
   string self = argv[0];
@@ -932,7 +1053,14 @@ int main(int argc, char** argv) {
       fprintf(stderr, "etctl run: missing CMD\n");
       return 2;
     }
-    return cmdRun(name, res["CMD"].as<string>(), res["timeout"].as<double>());
+    RunFraming framing = RunFraming::kAuto;
+    if (res.count("osc133")) {
+      framing = RunFraming::kOsc133;
+    } else if (res.count("no-osc133")) {
+      framing = RunFraming::kMark;
+    }
+    return cmdRun(name, res["CMD"].as<string>(), res["timeout"].as<double>(),
+                  framing);
   }
   if (cmd == "expect") {
     if (!res.count("PATTERN")) {
