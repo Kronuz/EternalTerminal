@@ -12,7 +12,7 @@ TerminalClient::TerminalClient(
     const string& passkey, shared_ptr<Console> _console, bool jumphost,
     const string& tunnels, const string& reverseTunnels, bool forwardSshAgent,
     const string& identityAgent, int _keepaliveDuration,
-    const vector<pair<string, string>>& envVars)
+    const vector<pair<string, string>>& envVars, bool attachExisting)
     : console(_console),
       shuttingDown(false),
       keepaliveDuration(_keepaliveDuration) {
@@ -76,6 +76,21 @@ TerminalClient::TerminalClient(
 
   connection = shared_ptr<ClientConnection>(
       new ClientConnection(_socketHandler, _socketEndpoint, id, passkey));
+
+  // Taking over a session an earlier process left behind: the shell, its cwd
+  // and its children are already there, so the only job is to re-establish the
+  // byte streams. The initial-payload exchange below is session *setup* and
+  // would desync a session that is already running, so it is skipped entirely.
+  if (attachExisting) {
+    if (connection->attach()) {
+      VLOG(1) << "Attached to existing session: " << connection->getId();
+      TelemetryService::get()->logToDatadog("Session Attached", el::Level::Info,
+                                            __FILE__, __LINE__);
+      return;
+    }
+    CLOG(INFO, "stdout") << "No session to attach to; starting a new one."
+                         << endl;
+  }
 
   int connectFailCount = 0;
   while (true) {

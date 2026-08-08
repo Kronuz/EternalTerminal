@@ -70,6 +70,17 @@ inline string socketPathForName(const string& name) {
 }
 
 /*
+ * Where a session's ET credentials (id + passkey) are cached, so a later
+ * process can adopt the remote session instead of bootstrapping a new one.
+ * Lives beside the socket, in the same 0700 directory, and is written 0600:
+ * the passkey is the session credential, and anyone holding it can drive the
+ * remote shell.
+ */
+inline string credsPathForName(const string& name) {
+  return controlDir() + "/" + name + ".creds";
+}
+
+/*
  * Names of sessions whose socket files currently exist (liveness is confirmed
  * separately by connecting).  Returns sorted names without the .sock suffix.
  */

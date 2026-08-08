@@ -32,7 +32,8 @@ class TerminalClient {
                  bool jumphost, const string& tunnels,
                  const string& reverseTunnels, bool forwardSshAgent,
                  const string& identityAgent, int _keepaliveDuration,
-                 const vector<pair<string, string>>& envVars);
+                 const vector<pair<string, string>>& envVars,
+                 bool attachExisting = false);
   /** @brief Tears down the client, closing sockets and stopping background
    * threads. */
   virtual ~TerminalClient();

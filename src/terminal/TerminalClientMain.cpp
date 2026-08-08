@@ -201,6 +201,10 @@ int main(int argc, char** argv) {
          "Path for the --ctl socket (default ~/.et/ctl/<name>.sock, "
          "or under $ETCTL_HOME)",
          cxxopts::value<std::string>())  //
+        ("attach",
+         "With --name: adopt the remote session that name left behind instead "
+         "of starting a new one, keeping its shell, cwd and running jobs. "
+         "Falls back to a new session if there is nothing to adopt.")  //
         ("f,forward-ssh-agent", "Forward ssh-agent socket")     //
         ("ssh-socket", "The ssh-agent socket to forward",
          cxxopts::value<std::string>())  //
@@ -467,25 +471,79 @@ int main(int argc, char** argv) {
 
     auto subprocessUtils = make_shared<SubprocessUtils>();
     SshSetupHandler sshSetupHandler(subprocessUtils);
-    pair<string, string> idpasskeypair = sshSetupHandler.SetupSsh(
-        username, destinationHost, host_alias, destinationPort, jumphost,
-        jServerFifo, result.count("x") > 0, result["verbose"].as<int>(),
-        etterminal_path, serverFifo, ssh_options);
+
+    // A named session can be adopted later, so its name has to be settled
+    // before we decide whether to bootstrap a new one.
+    string sessionName = result.count("name")
+                             ? result["name"].as<string>()
+                             : (destinationHost + "-" + genRandomHandle());
+
+    // --attach: reuse the credentials the previous process cached for this
+    // name. The server recognizes a returning client by id and key alone, so
+    // holding them is enough to take the session over. Anything missing or
+    // stale simply falls through to a normal bootstrap below.
+    pair<string, string> idpasskeypair;
+    bool attachExisting = false;
+#ifndef WIN32
+    if (result.count("attach") && result.count("name")) {
+      std::ifstream creds(control_paths::credsPathForName(sessionName));
+      string savedId, savedKey;
+      if (creds >> savedId >> savedKey && !savedId.empty() &&
+          !savedKey.empty()) {
+        idpasskeypair = std::make_pair(savedId, savedKey);
+        attachExisting = true;
+      } else {
+        CLOG(INFO, "stdout") << "No cached credentials for '" << sessionName
+                             << "'; starting a new session." << endl;
+      }
+    }
+#endif
+
+    if (!attachExisting) {
+      idpasskeypair = sshSetupHandler.SetupSsh(
+          username, destinationHost, host_alias, destinationPort, jumphost,
+          jServerFifo, result.count("x") > 0, result["verbose"].as<int>(),
+          etterminal_path, serverFifo, ssh_options);
+#ifndef WIN32
+      // Cache the credentials so a later process can adopt this session. 0600
+      // in the 0700 control dir: the passkey drives the remote shell.
+      if (result.count("name")) {
+        try {
+          control_paths::ensureControlDir();
+          const string credsPath = control_paths::credsPathForName(sessionName);
+          const int fd =
+              ::open(credsPath.c_str(),
+                     O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+          if (fd >= 0) {
+            const string line =
+                idpasskeypair.first + " " + idpasskeypair.second + "\n";
+            if (::write(fd, line.data(), line.size()) != (ssize_t)line.size()) {
+              LOG(WARNING) << "Short write caching session credentials";
+            }
+            ::close(fd);
+          } else {
+            LOG(WARNING) << "Could not cache session credentials at "
+                         << credsPath;
+          }
+        } catch (const std::runtime_error& err) {
+          LOG(WARNING) << "Could not cache session credentials: " << err.what();
+        }
+      }
+#endif
+    }
 
     TerminalClient terminalClient(
         clientSocket, clientPipeSocket, socketEndpoint, idpasskeypair.first,
         idpasskeypair.second, console, is_jumphost, tunnel_arg, r_tunnel_arg,
-        forwardAgent, sshSocket, keepaliveDuration, sshConfigOptions.env_vars);
+        forwardAgent, sshSocket, keepaliveDuration, sshConfigOptions.env_vars,
+        attachExisting);
     if (controlConsole) {
 #ifdef WIN32
       CLOG(INFO, "stdout") << "--ctl is not supported on Windows" << endl;
       exit(1);
 #else
-      // Resolve a stable session name and its local control socket, announce
-      // them on the real stdout, then detach and serve etctl requests.
-      string sessionName = result.count("name")
-                               ? result["name"].as<string>()
-                               : (destinationHost + "-" + genRandomHandle());
+      // Resolve the local control socket for the session name settled above,
+      // announce it on the real stdout, then detach and serve etctl requests.
       string socketPath;
       try {
         if (result.count("ctl-socket")) {
