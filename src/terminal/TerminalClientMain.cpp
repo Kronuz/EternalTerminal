@@ -202,10 +202,12 @@ int main(int argc, char** argv) {
          "or under $ETCTL_HOME)",
          cxxopts::value<std::string>())  //
         ("attach",
-         "With --name: adopt the remote session that name left behind instead "
-         "of starting a new one, keeping its shell, cwd and running jobs. "
-         "Falls back to a new session if there is nothing to adopt.")  //
-        ("f,forward-ssh-agent", "Forward ssh-agent socket")     //
+         "Name this session NAME and adopt the one already running under that "
+         "name on the host, keeping its shell, cwd and running jobs. Starts a "
+         "new session (and remembers it as NAME) when there is nothing to "
+         "adopt, so it is safe to use every time.",
+         cxxopts::value<std::string>())                      //
+        ("f,forward-ssh-agent", "Forward ssh-agent socket")  //
         ("ssh-socket", "The ssh-agent socket to forward",
          cxxopts::value<std::string>())  //
         ("telemetry",
@@ -472,42 +474,30 @@ int main(int argc, char** argv) {
     auto subprocessUtils = make_shared<SubprocessUtils>();
     SshSetupHandler sshSetupHandler(subprocessUtils);
 
-    // A named session can be adopted later, so its name has to be settled
-    // before we decide whether to bootstrap a new one.
-    string sessionName = result.count("name")
-                             ? result["name"].as<string>()
-                             : (destinationHost + "-" + genRandomHandle());
-
-    // --attach: reuse the credentials the previous process cached for this
-    // name. The server recognizes a returning client by id and key alone, so
-    // holding them is enough to take the session over. Anything missing or
-    // stale simply falls through to a normal bootstrap below.
-    pair<string, string> idpasskeypair;
-    bool attachExisting = false;
-#ifndef WIN32
-    if (result.count("attach") && result.count("name")) {
-      std::ifstream creds(control_paths::credsPathForName(sessionName));
-      string savedId, savedKey;
-      if (creds >> savedId >> savedKey && !savedId.empty() &&
-          !savedKey.empty()) {
-        idpasskeypair = std::make_pair(savedId, savedKey);
-        attachExisting = true;
-      } else {
-        CLOG(INFO, "stdout") << "No cached credentials for '" << sessionName
-                             << "'; starting a new session." << endl;
-      }
+    // A session's name is what makes it findable again later, so it has to be
+    // settled before we decide whether to adopt one or start one. --attach
+    // supplies it directly; --ctl --name keeps naming its control socket.
+    const bool attachRequested = result.count("attach") > 0;
+    string sessionName;
+    if (attachRequested) {
+      sessionName = result["attach"].as<string>();
+    } else if (result.count("name")) {
+      sessionName = result["name"].as<string>();
+    } else {
+      sessionName = destinationHost + "-" + genRandomHandle();
     }
-#endif
 
-    if (!attachExisting) {
-      idpasskeypair = sshSetupHandler.SetupSsh(
+    // Bootstrapping over SSH mints fresh credentials and a fresh remote shell.
+    // Cache the credentials under the session name (0600 in the 0700 control
+    // dir; the passkey drives the remote shell) so a later process can adopt
+    // this session instead of stranding it.
+    auto bootstrapNewSession = [&]() -> pair<string, string> {
+      pair<string, string> fresh = sshSetupHandler.SetupSsh(
           username, destinationHost, host_alias, destinationPort, jumphost,
           jServerFifo, result.count("x") > 0, result["verbose"].as<int>(),
           etterminal_path, serverFifo, ssh_options);
 #ifndef WIN32
-      // Cache the credentials so a later process can adopt this session. 0600
-      // in the 0700 control dir: the passkey drives the remote shell.
-      if (result.count("name")) {
+      if (attachRequested || result.count("name")) {
         try {
           control_paths::ensureControlDir();
           const string credsPath = control_paths::credsPathForName(sessionName);
@@ -515,8 +505,7 @@ int main(int argc, char** argv) {
               ::open(credsPath.c_str(),
                      O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
           if (fd >= 0) {
-            const string line =
-                idpasskeypair.first + " " + idpasskeypair.second + "\n";
+            const string line = fresh.first + " " + fresh.second + "\n";
             if (::write(fd, line.data(), line.size()) != (ssize_t)line.size()) {
               LOG(WARNING) << "Short write caching session credentials";
             }
@@ -530,13 +519,34 @@ int main(int argc, char** argv) {
         }
       }
 #endif
+      return fresh;
+    };
+
+    // With --attach, try the cached credentials first. Anything missing simply
+    // means there is nothing to adopt yet, so fall through and bootstrap; the
+    // client does the same if the server turns out to have no such session.
+    pair<string, string> idpasskeypair;
+    bool attachExisting = false;
+#ifndef WIN32
+    if (attachRequested) {
+      std::ifstream creds(control_paths::credsPathForName(sessionName));
+      string savedId, savedKey;
+      if (creds >> savedId >> savedKey && !savedId.empty() &&
+          !savedKey.empty()) {
+        idpasskeypair = std::make_pair(savedId, savedKey);
+        attachExisting = true;
+      }
+    }
+#endif
+    if (!attachExisting) {
+      idpasskeypair = bootstrapNewSession();
     }
 
     TerminalClient terminalClient(
         clientSocket, clientPipeSocket, socketEndpoint, idpasskeypair.first,
         idpasskeypair.second, console, is_jumphost, tunnel_arg, r_tunnel_arg,
         forwardAgent, sshSocket, keepaliveDuration, sshConfigOptions.env_vars,
-        attachExisting);
+        attachExisting, bootstrapNewSession);
     if (controlConsole) {
 #ifdef WIN32
       CLOG(INFO, "stdout") << "--ctl is not supported on Windows" << endl;

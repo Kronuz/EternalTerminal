@@ -25,15 +25,15 @@ class TerminalClient {
    * @brief Configures the client with the required sockets, console, and
    * tunnels.
    */
-  TerminalClient(std::shared_ptr<SocketHandler> _socketHandler,
-                 std::shared_ptr<SocketHandler> _pipeSocketHandler,
-                 const SocketEndpoint& _socketEndpoint, const string& id,
-                 const string& passkey, shared_ptr<Console> _console,
-                 bool jumphost, const string& tunnels,
-                 const string& reverseTunnels, bool forwardSshAgent,
-                 const string& identityAgent, int _keepaliveDuration,
-                 const vector<pair<string, string>>& envVars,
-                 bool attachExisting = false);
+  TerminalClient(
+      std::shared_ptr<SocketHandler> _socketHandler,
+      std::shared_ptr<SocketHandler> _pipeSocketHandler,
+      const SocketEndpoint& _socketEndpoint, const string& id,
+      const string& passkey, shared_ptr<Console> _console, bool jumphost,
+      const string& tunnels, const string& reverseTunnels, bool forwardSshAgent,
+      const string& identityAgent, int _keepaliveDuration,
+      const vector<pair<string, string>>& envVars, bool attachExisting = false,
+      std::function<pair<string, string>()> bootstrapNewSession = nullptr);
   /** @brief Tears down the client, closing sockets and stopping background
    * threads. */
   virtual ~TerminalClient();

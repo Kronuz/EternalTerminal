@@ -92,6 +92,16 @@ bool ClientConnection::attach() {
       socketFd = -1;
       return false;
     }
+    if (!response.has_writesequencenumber()) {
+      // A server that predates take-over cannot tell us where its outbound
+      // stream has reached, and guessing is not safe: assuming zero asks it to
+      // replay the whole session, including setup packets that abort the run
+      // loop. Decline and let the caller start a session normally.
+      LOG(INFO) << "Server does not support session take-over; falling back";
+      socketHandler->close(socketFd);
+      socketFd = -1;
+      return false;
+    }
 
     // Build the streams detached (fd -1): recover() owns the handshake and
     // revives them onto the socket, and it refuses to run against a live fd.
