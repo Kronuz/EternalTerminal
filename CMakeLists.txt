@@ -805,7 +805,6 @@ else(WIN32)
   add_dependencies(etctl generated-code et-lib)
   decorate_target(etctl)
 
-
   include(CTest)
 
   if(BUILD_TESTING)
