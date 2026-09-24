@@ -43,6 +43,11 @@ class UserTerminalHandler {
   recursive_mutex shutdownMutex;
   /** @brief True when TermInit requested a raw pipe command session. */
   bool pipeMode;
+  string id;
+  string passkey;
+  optional<SocketEndpoint> routerEndpoint;
+  bool ptyActive;
+  bool hadReverseTunnels;
 
   /** @brief Reads from the master fd and forwards data to the client socket. */
   void runUserTerminal(int masterFd);
@@ -54,6 +59,12 @@ class UserTerminalHandler {
   /** @brief Pumps a socket-backed terminal (test doubles, same protocol). */
   void runSocketTerminal(int masterFd);
 #endif
+
+  void registerWithRouter();
+
+  // Retries with backoff until the router is back; returns -1 on shutdown.
+  // The master fd is not drained meanwhile, so the shell blocks on output.
+  int reconnectRouter();
 };
 }  // namespace et
 
