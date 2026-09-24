@@ -237,6 +237,7 @@ class RealPtyEchoTerminal : public UserTerminal {
   }
   virtual void runTerminal() {}
   virtual void handleSessionEnd() {}
+  virtual void terminate() {}
   virtual void cleanup() {
     lock_guard<mutex> guard(cleanupMutex);
     if (cleanedUp) {
@@ -296,6 +297,11 @@ class RealPtyEchoTerminal : public UserTerminal {
   }
   virtual void runTerminal() {}
   virtual void handleSessionEnd() {}
+  virtual void terminate() {
+    if (childPid > 0) {
+      kill(childPid, SIGHUP);
+    }
+  }
   virtual void cleanup() {
     if (masterFd >= 0) {
       close(masterFd);
@@ -813,6 +819,35 @@ TEST_CASE_METHOD(EndToEndTestFixture, "EndToEndTest",
   readWriteTest(routerSocketHandler, fakeUserTerminal, serverEndpoint,
                 clientSocketHandler, clientPipeSocketHandler, fakeConsole,
                 routerEndpoint);
+}
+
+TEST_CASE_METHOD(EndToEndTestFixture, "TerminalKillAcknowledged",
+                 "[TerminalKill][integration]") {
+  const string id = genRandomAlphaNum(16);
+  const string passkey = genRandomAlphaNum(32);
+  auto handler = make_shared<UserTerminalHandler>(
+      routerSocketHandler, fakeUserTerminal, true, routerEndpoint,
+      id + "/" + passkey);
+  thread handlerThread([handler]() { handler->run(); });
+
+  bool acknowledged = false;
+  try {
+    TerminalClient client(clientSocketHandler, clientPipeSocketHandler,
+                          serverEndpoint, id, passkey, nullptr, false, "", "",
+                          false, "", MAX_CLIENT_KEEP_ALIVE_DURATION, {}, false,
+                          "", 3, false);
+    acknowledged = client.killSession(15);
+  } catch (...) {
+    handler->shutdown();
+    handlerThread.join();
+    throw;
+  }
+
+  handler->shutdown();
+  handlerThread.join();
+  REQUIRE(acknowledged);
+  REQUIRE(fakeUserTerminal->sessionEndHandled());
+  REQUIRE(fakeUserTerminal->wasCleanedUp());
 }
 
 TEST_CASE_METHOD(EndToEndTestFixture, "TerminalInfoQueryFailure",
